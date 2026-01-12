@@ -1,55 +1,48 @@
 const pool = require('../config/db');
-const fs = require('fs');
-const path = require('path');
 const { logAudit } = require('../utils/auditLogger');
 
-// Helper: Calculate Date
+// Helper: Calculate Disposal Date
 const calculateDisposalDate = (period) => {
     if (!period || typeof period !== 'string') return null;
     const cleanPeriod = period.toLowerCase().trim();
     if (cleanPeriod.includes('permanent')) return null;
+    
     const match = cleanPeriod.match(/(\d+)/);
     if (!match) return null;
+    
     const years = parseInt(match[0], 10);
     const date = new Date();
     date.setFullYear(date.getFullYear() + years);
     return date.toISOString().split('T')[0];
 };
 
-// Helper: Parse ID safely
-const parseId = (id) => {
-    if (id === undefined || id === null || id === '' || id === 'undefined') return null;
-    const parsed = parseInt(id, 10);
-    return isNaN(parsed) ? null : parsed;
-};
+// Helper: Parse ID
+const parseId = (id) => (id === undefined || id === null || id === '') ? null : parseInt(id, 10);
 
-// 1. UPLOAD RECORD
 exports.createRecord = async (req, res) => {
     try {
-        console.log(`--- [UPLOAD START] by User: ${req.user.username} (ID: ${req.user.id}) ---`);
+        console.log(`[UPLOAD] User: ${req.user.username} (ID: ${req.user.id})`);
         
         const { title, region_id, category_name, classification_rule, retention_period } = req.body;
         
-        // --- STEP 1: RESOLVE REGION ---
+        // 1. Resolve Region (Securely)
         let targetRegion = null;
-
         if (req.user.role === 'SUPER_ADMIN') {
             targetRegion = parseId(region_id);
         } else {
-            // Fetch fresh region from DB for security
+            // Double check DB
             const userCheck = await pool.query("SELECT region_id FROM users WHERE user_id = $1", [req.user.id]);
             targetRegion = userCheck.rows[0]?.region_id;
         }
 
         if (!targetRegion && req.user.role !== 'SUPER_ADMIN') {
-            return res.status(400).json({ message: "Error: Your account is not assigned to a region." });
+            return res.status(400).json({ message: "Account has no assigned region." });
         }
 
-        if (!req.file) return res.status(400).json({ message: "No file selected." });
+        if (!req.file) return res.status(400).json({ message: "No file uploaded." });
 
-        // --- STEP 2: PREPARE DATA ---
+        // 2. Prepare Data
         const disposalDate = calculateDisposalDate(retention_period);
-        const uploaderId = req.user.id; // Now guaranteed to exist
 
         const sql = `
             INSERT INTO records 
@@ -59,58 +52,34 @@ exports.createRecord = async (req, res) => {
         `;
 
         const values = [
-            title, 
-            targetRegion, 
-            category_name, 
-            classification_rule, 
-            retention_period, 
-            disposalDate, 
-            req.file.filename, 
-            req.file.size, 
-            req.file.mimetype, 
-            'Active',
-            uploaderId // Save the ID of the person uploading
+            title, targetRegion, category_name, classification_rule, retention_period, 
+            disposalDate, req.file.filename, req.file.size, req.file.mimetype, 
+            'Active', req.user.id
         ];
 
         const { rows } = await pool.query(sql, values);
         
         await logAudit(req, 'UPLOAD_RECORD', `Uploaded "${title}" to Region ${targetRegion}`);
-        console.log("✅ Upload Success. Record ID:", rows[0].record_id);
-        
-        res.status(201).json({ message: "Saved successfully", record_id: rows[0].record_id });
+        res.status(201).json({ message: "Saved", record_id: rows[0].record_id });
 
     } catch (error) {
-        console.error("❌ Upload Failed:", error.message);
-        res.status(500).json({ message: "Database Error", error: error.message });
+        console.error("Upload Failed:", error.message);
+        res.status(500).json({ message: "Db Error", error: error.message });
     }
 };
 
-// 2. GET RECORDS (DIAGNOSTIC VERSION)
 exports.getRecords = async (req, res) => {
     try {
         const { page = 1, limit = 10, search = '', category, status, region } = req.query;
         const offset = (page - 1) * limit;
 
-        // --- STEP A: RESOLVE USER REGION ---
+        // Fetch user region
         let userRegionId = req.user.region_id;
-        
         if (req.user.role !== 'SUPER_ADMIN') {
-             // Fetch fresh from DB to be 100% sure
              const userCheck = await pool.query("SELECT region_id FROM users WHERE user_id = $1", [req.user.id]);
-             
-             // SAFETY CHECK: Did we find the user?
-             if (userCheck.rows.length === 0) {
-                 return res.status(401).json({ message: "User record not found in database." });
-             }
-             
              userRegionId = userCheck.rows[0]?.region_id;
-             
-             // LOGGING FOR DEBUGGING
-             console.log(`🔍 [VIEW DEBUG] User: ${req.user.username} | Role: ${req.user.role} | Enforced Region ID: ${userRegionId}`);
         }
 
-        // --- STEP B: BUILD QUERY ---
-        // We select r.* and explicitly cast IDs to avoid mismatches
         let query = `
             SELECT r.*, reg.name as region_name, u.username as uploader_name
             FROM records r
@@ -121,35 +90,19 @@ exports.getRecords = async (req, res) => {
         let params = [];
         let counter = 1;
 
-        // --- SECURITY FILTER ---
+        // Security Filter
         if (req.user.role !== 'SUPER_ADMIN') {
-            // Force filtering by the user's assigned region
-            // We use parseId to ensure it's an INTEGER, not a string
             query += ` AND r.region_id = $${counter++}`;
-            params.push(parseId(userRegionId));
-        } 
-        else if (region && region !== 'All') {
-            // Super Admin specific filter
+            params.push(userRegionId);
+        } else if (region && region !== 'All') {
             query += ` AND r.region_id = $${counter++}`;
             params.push(parseId(region));
         }
 
-        // --- STANDARD FILTERS ---
-        if (status && status !== 'All') { 
-            query += ` AND r.status = $${counter++}`; 
-            params.push(status); 
-        }
-        
-        // Fix for Category Matching (Handles partial matches if folder names differ slightly)
-        if (category && category !== 'All') { 
-            query += ` AND r.category = $${counter++}`; 
-            params.push(category); 
-        }
-        
-        if (search) { 
-            query += ` AND r.title ILIKE $${counter++}`; 
-            params.push(`%${search}%`); 
-        }
+        // Standard Filters
+        if (status && status !== 'All') { query += ` AND r.status = $${counter++}`; params.push(status); }
+        if (category && category !== 'All') { query += ` AND r.category = $${counter++}`; params.push(category); }
+        if (search) { query += ` AND r.title ILIKE $${counter++}`; params.push(`%${search}%`); }
 
         query += ` ORDER BY r.uploaded_at DESC LIMIT $${counter++} OFFSET $${counter++}`;
         params.push(limit, offset);
@@ -159,9 +112,10 @@ exports.getRecords = async (req, res) => {
 
     } catch (err) {
         console.error("Fetch Error:", err.message);
-        res.status(500).json({ message: "Server Error: " + err.message });
+        res.status(500).json({ message: "Server Error" });
     }
 };
+
 
 exports.updateRecord = async (req, res) => {
     try {
