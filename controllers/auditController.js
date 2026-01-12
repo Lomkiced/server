@@ -1,9 +1,11 @@
 const pool = require('../config/db');
 
-// --- ADVANCED AUDIT CONTROLLER ---
+// --- PROFESSIONAL AUDIT CONTROLLER ---
 exports.filteredLogs = async (req, res) => {
     try {
-        const { role, region_id } = req.user;
+        const user = req.user || {};
+        const role = (user.role || '').toUpperCase().trim();
+        const region_id = user.region_id;
         
         // 1. EXTRACT FILTERS
         const { 
@@ -15,6 +17,9 @@ exports.filteredLogs = async (req, res) => {
             start_date, 
             end_date 
         } = req.query;
+
+        // DEBUG: Print what the server receives (Check your VS Code Terminal)
+        console.log(`[AUDIT] User: ${user.username} (${role}) | Filters:`, req.query);
 
         const offset = (page - 1) * limit;
 
@@ -33,25 +38,25 @@ exports.filteredLogs = async (req, res) => {
             whereClause += ` AND a.region_id = $${counter++}`;
             queryParams.push(region_id);
 
-            // Hide Super Admin Actions (Privacy)
+            // Hide Super Admin Actions
             whereClause += ` AND (u.role != 'SUPER_ADMIN' OR u.role IS NULL)`;
         } 
         else if (role === 'SUPER_ADMIN') {
-            // Filter by Region (if selected)
+            // Filter by Region (if selected and valid)
             if (region_filter && region_filter !== 'ALL') {
                 whereClause += ` AND a.region_id = $${counter++}`;
-                queryParams.push(region_filter);
+                queryParams.push(parseInt(region_filter)); // Ensure integer
             }
         }
 
         // --- SEARCH (Across Username, Action, Details) ---
-        if (search) {
+        if (search && search.trim() !== '') {
             whereClause += ` AND (
                 u.username ILIKE $${counter} OR 
                 a.action ILIKE $${counter} OR 
                 a.details ILIKE $${counter}
             )`;
-            queryParams.push(`%${search}%`);
+            queryParams.push(`%${search.trim()}%`);
             counter++;
         }
 
@@ -68,12 +73,11 @@ exports.filteredLogs = async (req, res) => {
         }
 
         if (end_date) {
-            // Append time to ensure we get the full day
             whereClause += ` AND a.created_at <= $${counter++}`;
             queryParams.push(`${end_date} 23:59:59`);
         }
 
-        // 3. FETCH DATA & COUNT (Parallel)
+        // 3. EXECUTE QUERY
         const dataQuery = `
             SELECT a.*, r.name as region_name, u.role as actor_role
             FROM audit_logs a
@@ -92,8 +96,11 @@ exports.filteredLogs = async (req, res) => {
             ${whereClause}
         `;
 
+        // Add Limit/Offset to params
+        const finalParams = [...queryParams, limit, offset];
+
         const [dataResult, countResult] = await Promise.all([
-            pool.query(dataQuery, [...queryParams, limit, offset]),
+            pool.query(dataQuery, finalParams),
             pool.query(countQuery, queryParams)
         ]);
 
