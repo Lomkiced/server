@@ -7,7 +7,7 @@ const { logAudit } = require('../utils/auditLogger');
 
 const JWT_SECRET = process.env.JWT_SECRET || "dost_secret_key_2025";
 
-// --- HELPERS ---
+// ... (Keep existing helpers like calculateDisposalDate and parseId) ...
 const calculateDisposalDate = (period) => {
     if (!period || typeof period !== 'string') return null;
     const cleanPeriod = period.toLowerCase().trim();
@@ -22,8 +22,45 @@ const calculateDisposalDate = (period) => {
 
 const parseId = (id) => (id === undefined || id === null || id === '') ? null : parseInt(id, 10);
 
-// --- 1. UPLOAD RECORD ---
+exports.archiveRecord = async (req, res) => {
+    try {
+        const { id } = req.params;
+        console.log(`[ARCHIVE] Request received for ID: ${id}`); // Debug Log
+
+        // Update status to 'Archived'
+        const result = await pool.query(
+            "UPDATE records SET status = 'Archived' WHERE record_id = $1 RETURNING title", 
+            [id]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ message: "Record not found" });
+        }
+
+        const title = result.rows[0].title;
+        await logAudit(req, 'ARCHIVE_RECORD', `Archived record: "${title}"`);
+        
+        res.json({ message: "Record archived successfully" });
+    } catch (err) { 
+        console.error("Archive Error:", err);
+        res.status(500).json({ message: "Archive Failed" }); 
+    }
+};
+
+// ... (Keep createRecord, getRecords, streamFile, updateRecord, restoreRecord, deleteRecord) ...
+// Make sure restoreRecord is also correct:
+exports.restoreRecord = async (req, res) => {
+    try {
+        const { id } = req.params;
+        await pool.query("UPDATE records SET status = 'Active' WHERE record_id = $1", [id]);
+        await logAudit(req, 'RESTORE_RECORD', `Restored record ID: ${id}`);
+        res.json({ message: "Restored" });
+    } catch (err) { res.status(500).json({ message: "Restore Failed" }); }
+};
+
+// Ensure other functions are maintained...
 exports.createRecord = async (req, res) => {
+    // ... (Your existing create logic) ...
     try {
         const { title, region_id, category_name, classification_rule, retention_period, is_restricted, file_password } = req.body;
         
@@ -70,8 +107,8 @@ exports.createRecord = async (req, res) => {
     }
 };
 
-// --- 2. GET RECORDS ---
 exports.getRecords = async (req, res) => {
+    // ... (Your existing get logic) ...
     try {
         const { page = 1, limit = 10, search = '', category, status, region } = req.query;
         const offset = (page - 1) * limit;
@@ -118,8 +155,8 @@ exports.getRecords = async (req, res) => {
     }
 };
 
-// --- 3. VERIFY & TOKEN ---
 exports.verifyRecordAccess = async (req, res) => {
+    // ... (Your existing verify logic) ...
     try {
         const { id } = req.params;
         const { password } = req.body;
@@ -146,8 +183,8 @@ exports.verifyRecordAccess = async (req, res) => {
     }
 };
 
-// --- 4. STREAM ---
 exports.streamFile = async (req, res) => {
+    // ... (Your existing stream logic) ...
     const { filename } = req.params;
     const { token } = req.query;
 
@@ -184,8 +221,8 @@ exports.streamFile = async (req, res) => {
     }
 };
 
-// --- CRUD ---
 exports.deleteRecord = async (req, res) => {
+    // ... (Your existing delete logic) ...
     try {
         const { id } = req.params;
         const fileData = await pool.query("SELECT title, file_path FROM records WHERE record_id = $1", [id]);
@@ -200,24 +237,8 @@ exports.deleteRecord = async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Delete Failed" }); }
 };
 
-exports.archiveRecord = async (req, res) => {
-    try {
-        const { id } = req.params;
-        await pool.query("UPDATE records SET status = 'Archived' WHERE record_id = $1", [id]);
-        res.json({ message: "Archived" });
-    } catch (err) { res.status(500).json({ message: "Archive Failed" }); }
-};
-
-exports.restoreRecord = async (req, res) => {
-    try {
-        const { id } = req.params;
-        await pool.query("UPDATE records SET status = 'Active' WHERE record_id = $1", [id]);
-        res.json({ message: "Restored" });
-    } catch (err) { res.status(500).json({ message: "Restore Failed" }); }
-};
-
-// --- UPDATE RECORD (FIXED) ---
 exports.updateRecord = async (req, res) => {
+    // ... (Your existing update logic) ...
     try {
         const { id } = req.params;
         const { title, region_id, category_name, classification_rule, retention_period } = req.body;
