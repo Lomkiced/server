@@ -4,8 +4,8 @@ exports.getDashboardStats = async (req, res) => {
     try {
         // 🔒 IDENTITY RECOVERY: Standardize User ID Access
         const { role, region_id } = req.user;
-        const user_id = req.user.id || req.user.user_id; 
-        
+        const user_id = req.user.id || req.user.user_id;
+
         let filterClause = "";
         let params = [];
 
@@ -17,7 +17,7 @@ exports.getDashboardStats = async (req, res) => {
             // This now matches the ID saved by createRecord
             filterClause = " WHERE uploaded_by = $1";
             params = [user_id];
-        } 
+        }
 
         // 2. FETCH DATA
         const [recordStats, storageStats, disposalQueue, recentLogs] = await Promise.all([
@@ -26,11 +26,13 @@ exports.getDashboardStats = async (req, res) => {
             pool.query(`
                 SELECT record_id, title, disposal_date, retention_period, status 
                 FROM records 
-                ${filterClause ? filterClause + " AND" : "WHERE"} status = 'Active' AND disposal_date IS NOT NULL
+                ${filterClause ? filterClause + " AND" : "WHERE"} status = 'Active' 
+                AND disposal_date IS NOT NULL
+                AND disposal_date <= (CURRENT_DATE + INTERVAL '7 days')
                 ORDER BY disposal_date ASC 
-                LIMIT 5
+                LIMIT 50
             `, params),
-            role === 'SUPER_ADMIN' 
+            role === 'SUPER_ADMIN'
                 ? pool.query("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 5")
                 : pool.query(`SELECT a.* FROM audit_logs a JOIN users u ON a.user_id = u.user_id WHERE u.region_id = $1 ORDER BY a.created_at DESC LIMIT 5`, [region_id || 0])
         ]);
