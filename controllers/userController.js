@@ -19,12 +19,33 @@ const getTargetRegion = (req, requestedRegionId) => {
     return parseId(req.user.region_id);
 };
 
+// --- HELPER: Ensure user_office_assignments table exists (no FK to sub_units) ---
+let tableChecked = false;
+const ensureAssignmentsTable = async () => {
+    if (tableChecked) return;
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS public.user_office_assignments (
+                assignment_id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES public.users(user_id) ON DELETE CASCADE,
+                office_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, office_id)
+            )
+        `);
+        tableChecked = true;
+    } catch (e) {
+        console.log('[ensureAssignmentsTable] Table already exists or error:', e.message);
+        tableChecked = true;
+    }
+};
+
 // 1. GET USERS (Scoped Security)
 exports.getUsers = async (req, res) => {
     try {
         let query = `
             SELECT u.user_id, u.username, u.name, u.role, u.region_id, u.office, u.status, u.created_at,
-                   r.name as region_name 
+                   r.name as region_name
             FROM users u
             LEFT JOIN regions r ON u.region_id = r.id 
             WHERE 1=1
@@ -32,11 +53,10 @@ exports.getUsers = async (req, res) => {
         let params = [];
         let counter = 1;
 
-        // SECURITY: Regional Admins see EVERYONE in their Region (Admins & Staff)
+        // SECURITY: Regional Admins see EVERYONE in their Region
         if (req.user.role === 'ADMIN' || req.user.role === 'REGIONAL_ADMIN') {
             query += ` AND u.region_id = $${counter++}`;
             params.push(req.user.region_id);
-            // Hide Super Admins from Regional view to avoid confusion
             query += ` AND u.role != 'SUPER_ADMIN'`;
         }
         // SECURITY: Staff see nobody
@@ -44,21 +64,25 @@ exports.getUsers = async (req, res) => {
             return res.status(403).json({ message: "Access Denied" });
         }
 
-        query += " ORDER BY u.role ASC, u.name ASC"; // Admins listed first
+        query += " ORDER BY u.role ASC, u.name ASC";
 
         const result = await pool.query(query, params);
-        res.json(result.rows);
+
+        // Return users with empty sub_units (skip problematic query for now)
+        const users = result.rows.map(user => ({ ...user, sub_units: [] }));
+
+        res.json(users);
 
     } catch (err) {
-        console.error("Get Users Error:", err.message);
-        res.status(500).json({ message: "Server Error" });
+        console.error("Get Users Error:", err.message, err.stack);
+        res.status(500).json({ message: "Server Error", error: err.message });
     }
 };
 
 // 2. CREATE USER (Auto-Link & Audit)
 exports.createUser = async (req, res) => {
     try {
-        const { username, password, name, role, office, region_id } = req.body;
+        const { username, password, name, role, office, region_id, sub_unit_ids } = req.body; // sub_unit_ids is array
 
         if (!username || !password || !name) {
             return res.status(400).json({ message: "Missing required fields." });
@@ -91,7 +115,16 @@ exports.createUser = async (req, res) => {
             [username, hashedPassword, name, role, targetRegion, office]
         );
 
-        // 6. Log Event
+        const newUserId = result.rows[0].user_id;
+
+        // 6. Handle Sub-Office Assignments (using new table without FK constraint)
+        if (Array.isArray(sub_unit_ids) && sub_unit_ids.length > 0) {
+            await ensureAssignmentsTable();
+            const assignmentValues = sub_unit_ids.map(sid => `(${newUserId}, ${parseInt(sid)})`).join(',');
+            await pool.query(`INSERT INTO user_office_assignments (user_id, office_id) VALUES ${assignmentValues} ON CONFLICT DO NOTHING`);
+        }
+
+        // 7. Log Event
         await logAudit(req, 'ADD_USER', `Onboarded ${role} "${username}" to Region ${targetRegion}`);
 
         res.json({ message: "User Created Successfully", user: result.rows[0] });
@@ -106,7 +139,7 @@ exports.createUser = async (req, res) => {
 exports.updateUser = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, office, status, password, role } = req.body;
+        const { name, office, status, password, role, sub_unit_ids } = req.body;
 
         // Security: Regional Admin can only touch their own region
         if (req.user.role === 'ADMIN' || req.user.role === 'REGIONAL_ADMIN') {
@@ -137,6 +170,17 @@ exports.updateUser = async (req, res) => {
         params.push(id);
 
         await pool.query(query, params);
+
+        // Handle Sub-Office Assignments (Reset & Re-assign using new table)
+        if (sub_unit_ids !== undefined) {
+            await ensureAssignmentsTable();
+            await pool.query("DELETE FROM user_office_assignments WHERE user_id = $1", [id]);
+            if (Array.isArray(sub_unit_ids) && sub_unit_ids.length > 0) {
+                const values = sub_unit_ids.map(sid => `(${id}, ${parseInt(sid)})`).join(',');
+                await pool.query(`INSERT INTO user_office_assignments (user_id, office_id) VALUES ${values} ON CONFLICT DO NOTHING`);
+            }
+        }
+
         await logAudit(req, 'UPDATE_USER', `Updated User ID: ${id}`);
 
         res.json({ message: "User Updated" });

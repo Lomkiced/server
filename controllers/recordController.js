@@ -142,8 +142,32 @@ exports.getRecords = async (req, res) => {
                 baseConditions += ` AND r.region_id = $${counter++}`;
                 params.push(parseId(region));
             }
+        } else if (req.user.role === 'STAFF') {
+            // STAFF: Restrict to their assigned region
+            baseConditions += ` AND r.region_id = $${counter++}`;
+            params.push(userRegionId);
+
+            // STAFF: Restrict to their assigned sub-offices (from user_office_assignments)
+            const assignmentResult = await pool.query(
+                `SELECT office_id AS assigned_office_id 
+                 FROM user_office_assignments 
+                 WHERE user_id = $1`,
+                [currentUserId]
+            );
+
+            if (assignmentResult.rows.length > 0) {
+                const assignedOfficeIds = assignmentResult.rows.map(row => row.assigned_office_id);
+                // Staff can see records from their assigned sub-offices
+                baseConditions += ` AND r.office_id = ANY($${counter++}::int[])`;
+                params.push(assignedOfficeIds);
+                console.log(`[getRecords] STAFF ${currentUserId} can access offices:`, assignedOfficeIds);
+            } else {
+                // No sub-office assignments = no access to any records
+                console.log(`[getRecords] STAFF ${currentUserId} has no office assignments, restricting all`);
+                baseConditions += ` AND 1=0`; // Always false, returns nothing
+            }
         } else {
-            // Standard users: restrict to their assigned region
+            // Other roles: restrict to their assigned region
             baseConditions += ` AND r.region_id = $${counter++}`;
             params.push(userRegionId);
         }
@@ -280,6 +304,26 @@ exports.getShelves = async (req, res) => {
         `;
 
         const params = [cleanRegion, cleanOffice, cleanCategory];
+        let counter = 4;
+
+        // STAFF SUB-OFFICE ACCESS CONTROL
+        if (req.user && req.user.role === 'STAFF') {
+            const currentUserId = req.user.id || req.user.user_id;
+            const assignmentResult = await pool.query(
+                `SELECT office_id AS assigned_office_id 
+                 FROM user_office_assignments 
+                 WHERE user_id = $1`,
+                [currentUserId]
+            );
+
+            if (assignmentResult.rows.length > 0) {
+                const assignedOfficeIds = assignmentResult.rows.map(row => row.assigned_office_id);
+                query += ` AND office_id = ANY($${counter++}::int[])`;
+                params.push(assignedOfficeIds);
+            } else {
+                query += ` AND 1=0`; // No access
+            }
+        }
 
         // RESTRICTED FILTER (Complete Separation)
         if (restricted_only === 'true') {

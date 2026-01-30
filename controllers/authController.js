@@ -30,7 +30,17 @@ exports.login = async (req, res) => {
             return res.status(403).json({ message: "Account Suspended" });
         }
 
-        // 4. Sign Token (Using the Fixed Secret)
+        // 4. Fetch assigned sub-office IDs (for Staff access control)
+        let assigned_office_ids = [];
+        if (user.role === 'STAFF') {
+            const assignmentsResult = await pool.query(
+                `SELECT office_id FROM user_office_assignments WHERE user_id = $1`,
+                [user.user_id]
+            );
+            assigned_office_ids = assignmentsResult.rows.map(r => r.office_id);
+        }
+
+        // 5. Sign Token (Using the Fixed Secret)
         const token = jwt.sign(
             {
                 user_id: user.user_id,
@@ -42,7 +52,7 @@ exports.login = async (req, res) => {
             { expiresIn: '24h' }
         );
 
-        // 5. Success Response
+        // 6. Success Response
         req.user = { id: user.user_id, username: user.username, role: user.role, region_id: user.region_id };
         await logAudit(req, 'LOGIN_SUCCESS', `User ${username} logged in.`);
 
@@ -54,7 +64,8 @@ exports.login = async (req, res) => {
                 username: user.username,
                 role: user.role,
                 region_id: user.region_id,
-                office: user.office
+                office: user.office,
+                assigned_office_ids // Sub-offices the Staff can access
             }
         });
 
@@ -69,7 +80,23 @@ exports.getMe = async (req, res) => {
         // req.user comes from the middleware
         const result = await pool.query("SELECT user_id, username, role, region_id, office FROM users WHERE user_id = $1", [req.user.user_id]);
         if (result.rows.length === 0) return res.status(404).json({ message: "User not found" });
-        res.json(result.rows[0]);
+
+        const user = result.rows[0];
+
+        // Fetch assigned sub-office IDs for Staff users
+        let assigned_office_ids = [];
+        if (user.role === 'STAFF') {
+            const assignmentsResult = await pool.query(
+                `SELECT office_id FROM user_office_assignments WHERE user_id = $1`,
+                [user.user_id]
+            );
+            assigned_office_ids = assignmentsResult.rows.map(r => r.office_id);
+        }
+
+        res.json({
+            ...user,
+            assigned_office_ids
+        });
     } catch (err) {
         res.status(500).json({ message: "Server Error" });
     }
