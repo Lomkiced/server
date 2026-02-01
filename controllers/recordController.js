@@ -281,7 +281,12 @@ exports.getShelves = async (req, res) => {
         // DEBUG: Log the restricted_only value
         console.log('[getShelves] restricted_only:', restricted_only, 'Type:', typeof restricted_only);
 
-        if (!region_id || !office_id || !category) return res.status(400).json({ message: "Missing filters" });
+        if (!region_id || !category) {
+            const missing = [];
+            if (!region_id) missing.push("region_id");
+            if (!category) missing.push("category");
+            return res.status(400).json({ message: `Missing filters: ${missing.join(', ')}` });
+        }
 
         // Sanitize
         const cleanCategory = decodeURIComponent(category).trim();
@@ -294,17 +299,29 @@ exports.getShelves = async (req, res) => {
         console.log('Office:', cleanOffice);
         console.log('Category:', JSON.stringify(cleanCategory));
 
+        const params = [cleanRegion];
         let query = `
             SELECT DISTINCT shelf 
             FROM records 
             WHERE region_id = $1 
-            AND (office_id = $2 OR office_id IN (SELECT office_id FROM offices WHERE parent_id = $2))
-            AND category = $3 
             AND status = 'Active'
         `;
 
-        const params = [cleanRegion, cleanOffice, cleanCategory];
-        let counter = 4;
+        // CATEGORY FILTER ($2)
+        query += ` AND category = $2`;
+        params.push(cleanCategory.trim());
+
+        // OFFICE FILTER LOGIC ($3 if exists)
+        if (cleanOffice) {
+            query += ` AND (office_id = $3 OR office_id IN (SELECT office_id FROM offices WHERE parent_id = $3))`;
+            params.push(cleanOffice);
+        } else {
+            query += ` AND office_id IS NULL`;
+        }
+
+        // Counter for next params (Staff Access checks, Restricted, etc)
+        // calculated based on current params length
+        let counter = params.length + 1;
 
         // STAFF SUB-OFFICE ACCESS CONTROL
         if (req.user && req.user.role === 'STAFF') {
@@ -318,10 +335,12 @@ exports.getShelves = async (req, res) => {
 
             if (assignmentResult.rows.length > 0) {
                 const assignedOfficeIds = assignmentResult.rows.map(row => row.assigned_office_id);
-                query += ` AND office_id = ANY($${counter++}::int[])`;
+                // Allow access to Assigned Offices OR Province Level (NULL or 0)
+                query += ` AND (office_id = ANY($${counter++}::int[]) OR office_id IS NULL OR office_id = 0)`;
                 params.push(assignedOfficeIds);
             } else {
-                query += ` AND 1=0`; // No access
+                // If no office assigned, they can ONLY see Province Level
+                query += ` AND (office_id IS NULL OR office_id = 0)`;
             }
         }
 
