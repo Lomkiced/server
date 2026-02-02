@@ -239,6 +239,7 @@ exports.getRecords = async (req, res) => {
                    r.retention_period, r.disposal_date, r.file_path, r.file_size, r.file_type, 
                    r.status, r.uploaded_at, r.is_restricted,
                    r.period_covered, r.volume, r.duplication, r.time_value, r.utility_value, 
+                   r.updated_at, r.created_at, r.archived_at,
                    reg.name as region_name, u.username as uploader_name,
                    o.name as office_name, o.code as office_code
             FROM records r
@@ -420,7 +421,7 @@ exports.deleteShelf = async (req, res) => {
 exports.archiveRecord = async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query("UPDATE records SET status = 'Archived' WHERE record_id = $1 RETURNING title", [id]);
+        const result = await pool.query("UPDATE records SET status = 'Archived', updated_at = NOW(), archived_at = NOW() WHERE record_id = $1 RETURNING title", [id]);
         if (result.rowCount === 0) return res.status(404).json({ message: "Record not found" });
         await logAudit(req, 'ARCHIVE_RECORD', `Archived "${result.rows[0].title}"`);
         res.json({ message: "Archived" });
@@ -430,7 +431,7 @@ exports.archiveRecord = async (req, res) => {
 exports.restoreRecord = async (req, res) => {
     try {
         const { id } = req.params;
-        await pool.query("UPDATE records SET status = 'Active' WHERE record_id = $1", [id]);
+        await pool.query("UPDATE records SET status = 'Active', updated_at = NOW(), archived_at = NULL WHERE record_id = $1", [id]);
         await logAudit(req, 'RESTORE_RECORD', `Restored ID: ${id}`);
         res.json({ message: "Restored" });
     } catch (err) { res.status(500).json({ message: "Restore Failed" }); }
