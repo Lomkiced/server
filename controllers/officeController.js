@@ -1,36 +1,39 @@
 const pool = require('../config/db');
 
 // 1. GET OFFICES BY REGION OR PARENT
+// 1. GET OFFICES BY REGION OR PARENT
 exports.getOffices = async (req, res) => {
     try {
-        const { region_id, parent_office_id } = req.query;
+        const { region_id, parent_office_id, page = 1, limit = 10, search } = req.query;
+        const offset = (page - 1) * limit;
 
-        let query = `
-            SELECT o.*, r.name as region_name, p.name as parent_office_name
-            FROM offices o 
-            LEFT JOIN regions r ON o.region_id = r.id 
-            LEFT JOIN offices p ON o.parent_id = p.office_id
-            WHERE o.status = 'Active'
-        `;
+        // Base Conditions
+        let baseConditions = " WHERE o.status = 'Active'";
         const params = [];
+
+        // Filter by search (name or code)
+        if (search) {
+            params.push(`%${search}%`);
+            baseConditions += ` AND (o.name ILIKE $${params.length} OR o.code ILIKE $${params.length})`;
+        }
 
         // Filter by region if provided
         if (region_id) {
             params.push(region_id);
-            query += ` AND o.region_id = $${params.length}`;
+            baseConditions += ` AND o.region_id = $${params.length}`;
         }
 
         // Filter by parent office (for sub-offices)
         // If parent_office_id is explicitly provided
         if (parent_office_id) {
             params.push(parent_office_id);
-            query += ` AND o.parent_id = $${params.length}`;
+            baseConditions += ` AND o.parent_id = $${params.length}`;
         } else if (!parent_office_id && region_id) {
             // If querying by region but NOT specific parent, usually we want TOP LEVEL offices (parent_id is null)
             // However, to keep backward compatibility, we might want all.
             // Let's modify: If "toplevel=true" is passed, we filter parent_id IS NULL.
             if (req.query.toplevel === 'true') {
-                query += ` AND o.parent_id IS NULL`;
+                baseConditions += ` AND o.parent_id IS NULL`;
             }
         }
 
@@ -39,14 +42,37 @@ exports.getOffices = async (req, res) => {
             // Ensure the region matches (already filtered by region_id if passed, but double check)
             if (!region_id) {
                 params.push(req.user.region_id);
-                query += ` AND o.region_id = $${params.length}`;
+                baseConditions += ` AND o.region_id = $${params.length}`;
             }
         }
 
-        query += ` ORDER BY o.name ASC`;
+        // 1. Get Total Count
+        const countQuery = `SELECT COUNT(*) FROM offices o ${baseConditions}`;
+        const countResult = await pool.query(countQuery, params);
+        const total = parseInt(countResult.rows[0].count);
 
-        const { rows } = await pool.query(query, params);
-        res.json(rows);
+        // 2. Get Paginated Data
+        let query = `
+            SELECT o.*, r.name as region_name, p.name as parent_office_name
+            FROM offices o 
+            LEFT JOIN regions r ON o.region_id = r.id 
+            LEFT JOIN offices p ON o.parent_id = p.office_id
+            ${baseConditions}
+            ORDER BY o.name ASC
+            LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        `;
+
+        const dataParams = [...params, limit, offset];
+        const { rows } = await pool.query(query, dataParams);
+
+        res.json({
+            data: rows,
+            pagination: {
+                total,
+                current: parseInt(page),
+                pages: Math.ceil(total / limit)
+            }
+        });
     } catch (err) {
         console.error("Get Offices Error:", err);
         res.status(500).json({ message: "Server Error" });
